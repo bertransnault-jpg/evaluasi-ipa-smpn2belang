@@ -1,46 +1,111 @@
-// Handle Submit Form Siswa (Versi Aman dengan Timeout & Pesan Error)
-const form = document.getElementById('evaluasiForm');
-form.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const submitBtn = document.getElementById('submitBtn');
-    submitBtn.disabled = true;
-    submitBtn.textContent = "Menyimpan Data...";
-
-    const nama = document.getElementById('namaSiswa').value;
-    const kelas = document.getElementById('kelasSiswa').value;
-    const timestamp = new Date().toISOString();
-
-    let jawabanData = {};
-    for (let i = 1; i <= 10; i++) {
-        const selected = document.querySelector(`input[name="soal_${i}"]:checked`);
-        jawabanData[`soal_${i}`] = selected ? parseInt(selected.value) : 0;
-    }
+window.loadRekapData = async function() {
+    const filterKelas = document.getElementById('filterKelas').value;
+    const tbody = document.getElementById('tabelRekapBody');
+    tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-gray-500">Mengambil data dari Firebase...</td></tr>`;
 
     try {
-        // Buat timeout 10 detik jika koneksi lambat/terblokir
+        const dbRef = ref(db, 'evaluasi_ipa');
+        
+        // Berikan batas waktu (timeout) 10 detik agar tidak loading selamanya jika koneksi terblokir
         const timeoutPromise = new Promise((_, reject) => 
-            setTimeout(() => reject(new Error("Koneksi timeout. Periksa aturan Firebase Rules Anda.")), 10000)
+            setTimeout(() => reject(new Error("Koneksi timeout saat memuat data.")), 10000)
         );
 
-        const savePromise = async () => {
-            const evaluasiRef = ref(db, 'evaluasi_ipa');
-            await set(push(evaluasiRef), { 
-                namaSiswa: nama, 
-                kelasSiswa: kelas, 
-                waktuPengisian: timestamp, 
-                jawaban: jawabanData 
+        const fetchPromise = get(dbRef);
+        const snapshot = await Promise.race([fetchPromise, timeoutPromise]);
+
+        if (!snapshot.exists()) {
+            tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-gray-500">Belum ada data evaluasi yang masuk dari siswa. Silakan isi form siswa terlebih dahulu.</td></tr>`;
+            document.getElementById('statTotalResponden').textContent = '0';
+            document.getElementById('statRataRata').textContent = '0.0';
+            document.getElementById('statGameScore').textContent = '0.0';
+            document.getElementById('deskripsiAnalisis').innerHTML = `<p class="text-gray-600">Belum ada data untuk dianalisis. Pastikan siswa sudah mengirimkan data.</p>`;
+            return;
+        }
+
+        let totalResponden = 0;
+        let jumlahPerSoal = new Array(10).fill(0);
+        let jumlahGameScore = 0; 
+        let countGameScore = 0;
+
+        snapshot.forEach((childSnapshot) => {
+            const data = childSnapshot.val();
+            // Validasi struktur data aman
+            if (data && data.jawaban && (filterKelas === 'SEMUA' || data.kelasSiswa === filterKelas)) {
+                totalResponden++;
+                for (let i = 1; i <= 10; i++) {
+                    let val = parseInt(data.jawaban[`soal_${i}`]) || 0;
+                    jumlahPerSoal[i - 1] += val;
+
+                    if (i >= 5 && i <= 7) {
+                        jumlahGameScore += val;
+                        countGameScore++;
+                    }
+                }
+            }
+        });
+
+        if (totalResponden === 0) {
+            tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-gray-500">Tidak ada data untuk kelas ${filterKelas}.</td></tr>`;
+            document.getElementById('statTotalResponden').textContent = '0';
+            document.getElementById('statRataRata').textContent = '0.0';
+            document.getElementById('statGameScore').textContent = '0.0';
+            document.getElementById('deskripsiAnalisis').innerHTML = `<p class="text-gray-600">Tidak ada data untuk kelas ini.</p>`;
+            return;
+        }
+
+        // Kalkulasi rata-rata
+        let rataRataPerSoal = jumlahPerSoal.map(total => total / totalResponden);
+        let totalSkorSemua = rataRataPerSoal.reduce((a, b) => a + b, 0);
+        let rataRataTotal = totalSkorSemua / 10;
+        let rataRataGame = countGameScore > 0 ? (jumlahGameScore / countGameScore).toFixed(1) : '0.0';
+
+        document.getElementById('statTotalResponden').textContent = totalResponden;
+        document.getElementById('statRataRata').textContent = rataRataTotal.toFixed(2);
+        document.getElementById('statGameScore').textContent = rataRataGame;
+
+        tbody.innerHTML = '';
+        let analitikPoinPerbaikan = [];
+
+        rataRataPerSoal.forEach((skor, idx) => {
+            let kategori = "";
+            let warnaBadge = "";
+            if (skor >= 3.25) { kategori = "Sangat Baik"; warnaBadge = "bg-emerald-100 text-emerald-800"; }
+            else if (skor >= 2.5) { kategori = "Baik"; warnaBadge = "bg-teal-100 text-teal-800"; }
+            else if (skor >= 1.75) { kategori = "Cukup / Perlu Perhatian"; warnaBadge = "bg-yellow-100 text-yellow-800"; }
+            else { kategori = "Kurang / Kendala Tinggi"; warnaBadge = "bg-red-100 text-red-800"; }
+
+            tbody.innerHTML += `
+                <tr class="hover:bg-gray-50">
+                    <td class="p-3 font-medium">${idx + 1}</td>
+                    <td class="p-3">${daftarPertanyaan[idx]}</td>
+                    <td class="p-3 text-center font-bold">${skor.toFixed(2)}</td>
+                    <td class="p-3"><span class="px-2.5 py-1 rounded-full text-xs font-semibold ${warnaBadge}">${kategori}</span></td>
+                </tr>
+            `;
+
+            if (skor < 2.75) {
+                analitikPoinPerbaikan.push({ no: idx + 1, teks: daftarPertanyaan[idx], skor: skor.toFixed(2) });
+            }
+        });
+
+        // Susun Narasi Analisis Otomatis
+        let htmlDeskripsi = `<p class="font-semibold text-amber-900">Berdasarkan hasil pengolahan data dari ${totalResponden} siswa (${filterKelas}):</p><ul class="list-disc pl-5 space-y-1 text-xs md:text-sm">`;
+        
+        if (analitikPoinPerbaikan.length === 0) {
+            htmlDeskripsi += `<li>Secara keseluruhan, proses pembelajaran dan penggunaan media ajar game IPA menunjukkan hasil yang <strong>sangat baik</strong> di semua indikator. Pertahankan metode pengajaran saat ini!</li>`;
+        } else {
+            htmlDeskripsi += `<li>Terdapat beberapa poin aspek pembelajaran yang memperoleh skor relatif rendah dan <strong>perlu diperbaiki/ditingkatkan</strong> pada pertemuan berikutnya:</li>`;
+            analitikPoinPerbaikan.forEach(item => {
+                htmlDeskripsi += `<li class="mt-1"><strong>Soal #${item.no} (${item.teks})</strong> memiliki rata-rata skor rendah (${item.skor}). <span class="text-amber-800 font-medium">Rekomendasi perbaikan:</span> Guru perlu memperjelas instruksi atau mengevaluasi ulang aspek tersebut.</li>`;
             });
-        };
+        }
 
-        // Jalankan penyimpanan dengan pengaman timeout
-        await Promise.race([savePromise(), timeoutPromise]);
+        htmlDeskripsi += `</ul>`;
+        document.getElementById('deskripsiAnalisis').innerHTML = htmlDeskripsi;
 
-        form.classList.add('hidden');
-        document.getElementById('successMessage').classList.remove('hidden');
-    } catch (error) {
-        console.error(error);
-        alert("Gagal menyimpan data: " + error.message);
-        submitBtn.disabled = false;
-        submitBtn.textContent = "Kirim Evaluasi Pembelajaran";
+    } catch (err) {
+        console.error("Error Detail:", err);
+        tbody.innerHTML = `<tr><td colspan="4" class="p-4 text-center text-red-500">Gagal memuat data. Periksa koneksi atau Firebase Rules Anda. (${err.message})</td></tr>`;
     }
-});
+}
